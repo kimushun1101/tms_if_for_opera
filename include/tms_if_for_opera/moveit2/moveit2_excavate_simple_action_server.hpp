@@ -37,6 +37,7 @@
 #include <mongocxx/instance.hpp>
 
 #include "tms_if_for_opera/excavator_ik.hpp"
+#include "tms_if_for_opera/excavator_pose_converter.hpp"
 
 #include <fstream>
 
@@ -72,6 +73,7 @@ private:
   std::map<std::string, double> current_joint_values_;
   // std::map<std::string, double> target_joint_values_;
   ExcavatorIK excavator_ik_;
+  ExcavatorPoseConverter pose_converter_;
   moveit::core::RobotStatePtr robot_state_;
 
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr emg_stop_publisher_;  // for emg stop
