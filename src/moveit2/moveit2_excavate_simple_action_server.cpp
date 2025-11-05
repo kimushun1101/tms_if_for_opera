@@ -177,7 +177,7 @@ void Moveit2ExcavateSimpleActionServer::execute(const std::shared_ptr<GoalHandle
       // 新しく padding_msg を作成
       moveit_msgs::msg::LinkPadding padding_msg;
       padding_msg.link_name = link_names_[i];  // パディングを適用するリンク
-      padding_msg.padding = 0.25;
+      padding_msg.padding = 0.50;
       // パディングリストに追加
       planning_scene_msg.link_padding.push_back(padding_msg);
   }
@@ -216,6 +216,7 @@ void Moveit2ExcavateSimpleActionServer::execute(const std::shared_ptr<GoalHandle
   moveit::core::RobotState start_state(*move_group_->getCurrentState());
   
   bool planning_success = true;
+  const int max_planning_attempts = 10;  // 最大試行回数
 
   // 0. swing_angleだけ先に設定
   std::vector<double> swing_joint_values;
@@ -230,47 +231,58 @@ void Moveit2ExcavateSimpleActionServer::execute(const std::shared_ptr<GoalHandle
     }
   }
   
-  move_group_->setStartState(start_state);
-  move_group_->setJointValueTarget(swing_joint_values);
-  
   moveit::planning_interface::MoveGroupInterface::Plan swing_plan;
-  if (move_group_->plan(swing_plan) != moveit::core::MoveItErrorCode::SUCCESS) {
-    RCLCPP_ERROR(this->get_logger(), "Failed to plan swing movement");
-    planning_success = false;
-  } else {
-    plans.push_back(swing_plan);
+  bool swing_plan_success = false;
+  for (int attempt = 1; attempt <= max_planning_attempts && !swing_plan_success; attempt++) {
+    RCLCPP_INFO(this->get_logger(), "Swing movement planning attempt %d/%d", attempt, max_planning_attempts);
+    move_group_->setStartState(start_state);
+    move_group_->setJointValueTarget(swing_joint_values);
     
-    // 次の開始状態を更新
-    start_state.setJointGroupPositions(
-      move_group_->getRobotModel()->getJointModelGroup(move_group_->getName()), 
-      swing_joint_values);
-    start_state.update();
-    
-    RCLCPP_INFO(this->get_logger(), "Swing movement plan succeeded");
+    if (move_group_->plan(swing_plan) == moveit::core::MoveItErrorCode::SUCCESS) {
+      swing_plan_success = true;
+      plans.push_back(swing_plan);
+      
+      // 次の開始状態を更新
+      start_state.setJointGroupPositions(
+        move_group_->getRobotModel()->getJointModelGroup(move_group_->getName()), 
+        swing_joint_values);
+      start_state.update();
+      
+      RCLCPP_INFO(this->get_logger(), "Swing movement plan succeeded on attempt %d", attempt);
+    } else if (attempt == max_planning_attempts) {
+      RCLCPP_ERROR(this->get_logger(), "Failed to plan swing movement after %d attempts", max_planning_attempts);
+      planning_success = false;
+    }
   }
 
   // 1. setPoseTargetでplanを作成
   if (planning_success) {
-    move_group_->setStartState(start_state);
-    move_group_->setPoseTarget(moveit_pose);
-    
     moveit::planning_interface::MoveGroupInterface::Plan pose_plan;
-    if (move_group_->plan(pose_plan) != moveit::core::MoveItErrorCode::SUCCESS) {
-      RCLCPP_ERROR(this->get_logger(), "Failed to plan to pose target");
-      planning_success = false;
-    } else {
-      plans.push_back(pose_plan);
+    bool pose_plan_success = false;
+    
+    for (int attempt = 1; attempt <= max_planning_attempts && !pose_plan_success; attempt++) {
+      RCLCPP_INFO(this->get_logger(), "Pose target planning attempt %d/%d", attempt, max_planning_attempts);
+      move_group_->setStartState(start_state);
+      move_group_->setPoseTarget(moveit_pose);
       
-      // planの終端姿勢を取得して次の開始状態にする
-      const auto& trajectory = pose_plan.trajectory_.joint_trajectory;
-      if (!trajectory.points.empty()) {
-        const auto& last_point = trajectory.points.back();
-        start_state.setJointGroupPositions(
-          move_group_->getRobotModel()->getJointModelGroup(move_group_->getName()), 
-          last_point.positions);
-        start_state.update();
+      if (move_group_->plan(pose_plan) == moveit::core::MoveItErrorCode::SUCCESS) {
+        pose_plan_success = true;
+        plans.push_back(pose_plan);
         
-        RCLCPP_INFO(this->get_logger(), "Pose target plan succeeded, using end state for next plan");
+        // planの終端姿勢を取得して次の開始状態にする
+        const auto& trajectory = pose_plan.trajectory_.joint_trajectory;
+        if (!trajectory.points.empty()) {
+          const auto& last_point = trajectory.points.back();
+          start_state.setJointGroupPositions(
+            move_group_->getRobotModel()->getJointModelGroup(move_group_->getName()), 
+            last_point.positions);
+          start_state.update();
+          
+          RCLCPP_INFO(this->get_logger(), "Pose target plan succeeded on attempt %d, using end state for next plan", attempt);
+        }
+      } else if (attempt == max_planning_attempts) {
+        RCLCPP_ERROR(this->get_logger(), "Failed to plan to pose target after %d attempts", max_planning_attempts);
+        planning_success = false;
       }
     }
   }
@@ -290,16 +302,22 @@ void Moveit2ExcavateSimpleActionServer::execute(const std::shared_ptr<GoalHandle
       }
     }
     
-    move_group_->setStartState(start_state);
-    move_group_->setJointValueTarget(arm_bucket_joint_values);
-    
     moveit::planning_interface::MoveGroupInterface::Plan arm_bucket_plan;
-    if (move_group_->plan(arm_bucket_plan) != moveit::core::MoveItErrorCode::SUCCESS) {
-      RCLCPP_ERROR(this->get_logger(), "Failed to plan arm and bucket movement");
-      planning_success = false;
-    } else {
-      plans.push_back(arm_bucket_plan);
-      RCLCPP_INFO(this->get_logger(), "Arm and bucket movement plan succeeded");
+    bool arm_bucket_plan_success = false;
+    
+    for (int attempt = 1; attempt <= max_planning_attempts && !arm_bucket_plan_success; attempt++) {
+      RCLCPP_INFO(this->get_logger(), "Arm and bucket movement planning attempt %d/%d", attempt, max_planning_attempts);
+      move_group_->setStartState(start_state);
+      move_group_->setJointValueTarget(arm_bucket_joint_values);
+      
+      if (move_group_->plan(arm_bucket_plan) == moveit::core::MoveItErrorCode::SUCCESS) {
+        arm_bucket_plan_success = true;
+        plans.push_back(arm_bucket_plan);
+        RCLCPP_INFO(this->get_logger(), "Arm and bucket movement plan succeeded on attempt %d", attempt);
+      } else if (attempt == max_planning_attempts) {
+        RCLCPP_ERROR(this->get_logger(), "Failed to plan arm and bucket movement after %d attempts", max_planning_attempts);
+        planning_success = false;
+      }
     }
   }
 
