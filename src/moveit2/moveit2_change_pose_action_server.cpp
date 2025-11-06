@@ -76,12 +76,6 @@ Moveit2ChangePoseActionServer::Moveit2ChangePoseActionServer(const rclcpp::NodeO
   move_group_options_ = std::make_shared<moveit::planning_interface::MoveGroupInterface::Options>(planning_group_, "robot_description", namespace_param);
   move_group_ = std::make_shared<moveit::planning_interface::MoveGroupInterface>(move_group_node_, *move_group_options_);
 
-  move_group_->setMaxVelocityScalingFactor(1.0);
-  move_group_->setMaxAccelerationScalingFactor(1.0);
-  move_group_->setNumPlanningAttempts(100);
-  move_group_->setPlanningTime(60.0);
-  move_group_->setPlannerId("RRTConnectkConfigDefault");
-
   // Get robot info
   joint_names_ = move_group_->getJointNames();
 
@@ -131,6 +125,14 @@ void Moveit2ChangePoseActionServer::handle_accepted(const std::shared_ptr<GoalHa
 
 void Moveit2ChangePoseActionServer::execute(const std::shared_ptr<GoalHandleExcavatorChangePose> goal_handle)
 {
+  move_group_->setGoalPositionTolerance(0.1);
+  move_group_->setGoalOrientationTolerance(0.1);
+  move_group_->setMaxVelocityScalingFactor(1.0);
+  move_group_->setMaxAccelerationScalingFactor(1.0);
+  move_group_->setNumPlanningAttempts(100);
+  move_group_->setPlanningTime(60.0);
+  move_group_->setPlannerId("RRTConnectkConfigDefault");
+
   // Apply collision object
   apply_collision_objects_from_db(collision_object_record_name_);
   apply_collision_objects_mesh_from_db(collision_object_dump_record_name_);

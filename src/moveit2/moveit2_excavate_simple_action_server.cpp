@@ -5,6 +5,8 @@
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.h>
 #include <moveit/robot_state/robot_state.h>
+#include <moveit/robot_trajectory/robot_trajectory.h>
+#include <moveit/trajectory_processing/iterative_time_parameterization.h>
 #include <sstream>
 #include <tf2_ros/transform_listener.h>
 #include <tf2_ros/buffer.h>
@@ -78,12 +80,6 @@ Moveit2ExcavateSimpleActionServer::Moveit2ExcavateSimpleActionServer(const rclcp
   
   // moveit::planning_interface::PlanningSceneInterface planning_scene_interface_;
 
-  move_group_->setMaxVelocityScalingFactor(1.0);
-  move_group_->setMaxAccelerationScalingFactor(1.0);
-  move_group_->setNumPlanningAttempts(10);
-  move_group_->setPlanningTime(10.0);
-  move_group_->setPlannerId("RRTConnectkConfigDefault");
-
   // Get robot info
   joint_names_ = move_group_->getJointNames();
 
@@ -138,6 +134,15 @@ void Moveit2ExcavateSimpleActionServer::execute(const std::shared_ptr<GoalHandle
 {
   // Start to execute goal
   RCLCPP_INFO(this->get_logger(), "Executing goal");
+
+  move_group_->setGoalPositionTolerance(0.1);
+  move_group_->setGoalOrientationTolerance(0.1);
+  move_group_->setMaxVelocityScalingFactor(1.0);
+  move_group_->setMaxAccelerationScalingFactor(1.0);
+  move_group_->setNumPlanningAttempts(100);
+  move_group_->setPlanningTime(60.0);
+  move_group_->setPlannerId("RRTConnectkConfigDefault");
+
   const auto goal = goal_handle->get_goal();
   auto feedback = std::make_shared<ExcavatorExcavateSimple::Feedback>();
   auto result = std::make_shared<ExcavatorExcavateSimple::Result>();
@@ -216,9 +221,6 @@ void Moveit2ExcavateSimpleActionServer::execute(const std::shared_ptr<GoalHandle
   RCLCPP_INFO(this->get_logger(), "Target pose in planning frame: x=%.3f, y=%.3f, z=%.3f", 
               moveit_pose.position.x, moveit_pose.position.y, moveit_pose.position.z);
 
-  move_group_->setGoalPositionTolerance(0.1);
-  move_group_->setGoalOrientationTolerance(0.1);
-
   std::vector<moveit::planning_interface::MoveGroupInterface::Plan> plans;
 
   // 最初の状態を取得
@@ -293,6 +295,107 @@ void Moveit2ExcavateSimpleActionServer::execute(const std::shared_ptr<GoalHandle
     // 円軌道のウェイポイントを入力パラメータ(x, y, z, theta_w)で生成
     std::vector<geometry_msgs::msg::Pose> waypoints;
     
+    // 最初と最後のwaypointでtheta_wを探索
+    double first_theta_w = theta_w;  // デフォルト値
+    double last_theta_w = theta_w;   // デフォルト値
+    
+    const moveit::core::JointModelGroup* joint_model_group = 
+      move_group_->getRobotModel()->getJointModelGroup(move_group_->getName());
+    
+    double search_step = 0.05;  // 探索ステップ（約2.9度）
+    
+    // 最初のwaypoint (i=0)の座標を計算
+    {
+      double angle = 2.0 * M_PI;  // 180度
+      double radial_offset = circle_radius * cos(angle);
+      double vertical_offset = circle_radius * sin(angle);
+      double new_horizontal_distance = horizontal_distance + radial_offset;
+      double first_x = new_horizontal_distance * cos(horizontal_angle);
+      double first_y = new_horizontal_distance * sin(horizontal_angle);
+      double first_z = center_z + vertical_offset;
+      
+      // 0に近い値から探索（0 → π）
+      bool found = false;
+      for (double search_theta = 0.0; search_theta <= M_PI; search_theta += search_step) {
+        Pose test_pose;
+        pose_converter_.convertToXYZQuaternion(first_x, first_y, first_z, search_theta, test_pose);
+        
+        geometry_msgs::msg::Pose target_pose_msg;
+        target_pose_msg.position.x = test_pose.x;
+        target_pose_msg.position.y = test_pose.y;
+        target_pose_msg.position.z = test_pose.z;
+        target_pose_msg.orientation.x = test_pose.qx;
+        target_pose_msg.orientation.y = test_pose.qy;
+        target_pose_msg.orientation.z = test_pose.qz;
+        target_pose_msg.orientation.w = test_pose.qw;
+        
+        moveit::core::RobotState test_state(*move_group_->getCurrentState());
+        // setFromIKの引数を正しく指定（エンドエフェクタリンク名とタイムアウトを追加）
+        const std::string& end_effector_link = move_group_->getEndEffectorLink();
+        bool ik_success = test_state.setFromIK(joint_model_group, target_pose_msg, end_effector_link, 0.1);
+        
+        if (ik_success && test_state.satisfiesBounds(joint_model_group)) {
+          first_theta_w = search_theta;
+          found = true;
+          RCLCPP_INFO(this->get_logger(), "First waypoint: found valid theta_w=%.3f rad (%.1f deg)", 
+                      first_theta_w, first_theta_w * 180.0 / M_PI);
+          break;
+        }
+      }
+      
+      if (!found) {
+        RCLCPP_WARN(this->get_logger(), "First waypoint: could not find valid theta_w, using default %.3f rad", first_theta_w);
+      }
+    }
+    
+    // 最後のwaypoint (i=num_waypoints)の座標を計算
+    {
+      double angle = M_PI;  // 0度
+      double radial_offset = circle_radius * cos(angle);
+      double vertical_offset = circle_radius * sin(angle);
+      double new_horizontal_distance = horizontal_distance + radial_offset;
+      double last_x = new_horizontal_distance * cos(horizontal_angle);
+      double last_y = new_horizontal_distance * sin(horizontal_angle);
+      double last_z = center_z + vertical_offset;
+      
+      // πに近い値から探索（π → 0）
+      bool found = false;
+      for (double search_theta = M_PI; search_theta >= 0.0; search_theta -= search_step) {
+        Pose test_pose;
+        pose_converter_.convertToXYZQuaternion(last_x, last_y, last_z, search_theta, test_pose);
+        
+        geometry_msgs::msg::Pose target_pose_msg;
+        target_pose_msg.position.x = test_pose.x;
+        target_pose_msg.position.y = test_pose.y;
+        target_pose_msg.position.z = test_pose.z;
+        target_pose_msg.orientation.x = test_pose.qx;
+        target_pose_msg.orientation.y = test_pose.qy;
+        target_pose_msg.orientation.z = test_pose.qz;
+        target_pose_msg.orientation.w = test_pose.qw;
+        
+        moveit::core::RobotState test_state(*move_group_->getCurrentState());
+        // setFromIKの引数を正しく指定（エンドエフェクタリンク名とタイムアウトを追加）
+        const std::string& end_effector_link = move_group_->getEndEffectorLink();
+        bool ik_success = test_state.setFromIK(joint_model_group, target_pose_msg, end_effector_link, 0.1);
+        
+        if (ik_success && test_state.satisfiesBounds(joint_model_group)) {
+          last_theta_w = search_theta;
+          found = true;
+          RCLCPP_INFO(this->get_logger(), "Last waypoint: found valid theta_w=%.3f rad (%.1f deg)", 
+                      last_theta_w, last_theta_w * 180.0 / M_PI);
+          break;
+        }
+      }
+      
+      if (!found) {
+        RCLCPP_WARN(this->get_logger(), "Last waypoint: could not find valid theta_w, using default %.3f rad", last_theta_w);
+      }
+    }
+    
+    RCLCPP_INFO(this->get_logger(), "theta_w range: %.3f rad (%.1f deg) to %.3f rad (%.1f deg)", 
+                first_theta_w, first_theta_w * 180.0 / M_PI, 
+                last_theta_w, last_theta_w * 180.0 / M_PI);
+    
     // 下半分の半円を描く（垂直平面上）- 奥から手前へ
     for (int i = 0; i <= num_waypoints; i++) {
       // 下半分の円を逆方向に: 180度から0度（2πからπ）
@@ -312,9 +415,9 @@ void Moveit2ExcavateSimpleActionServer::execute(const std::shared_ptr<GoalHandle
       double wp_y = new_horizontal_distance * sin(horizontal_angle);
       double wp_z = center_z + vertical_offset;
       
-      // theta_wを段階的に変化させる（0.5からπへ）
+      // theta_wを線形補間（最初と最後の値から）
       double t = static_cast<double>(i) / num_waypoints;  // 0.0 から 1.0
-      double wp_theta_w = 0.5 + t * (M_PI - 0.5);
+      double wp_theta_w = first_theta_w + t * (last_theta_w - first_theta_w);
       
       // pose_converterで変換
       Pose target_pose;
@@ -333,8 +436,6 @@ void Moveit2ExcavateSimpleActionServer::execute(const std::shared_ptr<GoalHandle
     }
     
     RCLCPP_INFO(this->get_logger(), "Generated %zu waypoints for semi-circular trajectory (lower half, back to front) in excavation plane", waypoints.size());
-    RCLCPP_INFO(this->get_logger(), "theta_w range: 0.5 rad (%.1f deg) to π rad (%.1f deg)", 
-                0.5 * 180.0 / M_PI, 180.0);
     
     // Planning frameを確認
     std::string planning_frame = move_group_->getPlanningFrame();
@@ -394,6 +495,21 @@ void Moveit2ExcavateSimpleActionServer::execute(const std::shared_ptr<GoalHandle
       RCLCPP_INFO(this->get_logger(), "Cartesian path planning achieved %.2f%% of the path", fraction * 100.0);
       
       if (fraction > 0.9) {  // 90%以上のパスが計画できた場合
+        // 軌道の速度を調整（joint_limitsを尊重）
+        robot_trajectory::RobotTrajectory rt(move_group_->getRobotModel(), move_group_->getName());
+        rt.setRobotTrajectoryMsg(*move_group_->getCurrentState(), trajectory);
+        
+        // IterativeParabolicTimeParameterizationを使用（joint_limitsを尊重）
+        trajectory_processing::IterativeParabolicTimeParameterization iptp;
+        bool success = iptp.computeTimeStamps(rt, 1.0, 1.0);  // velocity_scaling=1.0, accel_scaling=1.0
+        
+        if (success) {
+          rt.getRobotTrajectoryMsg(trajectory);
+          RCLCPP_INFO(this->get_logger(), "Successfully applied time parameterization to speed up trajectory");
+        } else {
+          RCLCPP_WARN(this->get_logger(), "Failed to apply time parameterization, using original trajectory");
+        }
+        
         moveit::planning_interface::MoveGroupInterface::Plan cartesian_plan;
         cartesian_plan.trajectory_ = trajectory;
         plans.push_back(cartesian_plan);
