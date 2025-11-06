@@ -12,6 +12,8 @@
 #include <geometric_shapes/shape_operations.h>
 #include <ament_index_cpp/get_package_share_directory.hpp>
 #include <fstream>
+#include <moveit/robot_trajectory/robot_trajectory.h>
+#include <moveit/trajectory_processing/iterative_time_parameterization.h>
 
 using namespace tms_if_for_opera;
 
@@ -136,6 +138,15 @@ void Moveit2ExcavateSimpleActionServer::execute(const std::shared_ptr<GoalHandle
 {
   // Start to execute goal
   RCLCPP_INFO(this->get_logger(), "Executing goal");
+
+  move_group_->setGoalPositionTolerance(0.1);
+  move_group_->setGoalOrientationTolerance(0.1);
+  move_group_->setMaxVelocityScalingFactor(1.0);
+  move_group_->setMaxAccelerationScalingFactor(1.0);
+  move_group_->setNumPlanningAttempts(100);
+  move_group_->setPlanningTime(60.0);
+  move_group_->setPlannerId("RRTConnectkConfigDefault");
+
   const auto goal = goal_handle->get_goal();
   auto feedback = std::make_shared<ExcavatorExcavateSimple::Feedback>();
   auto result = std::make_shared<ExcavatorExcavateSimple::Result>();
@@ -208,8 +219,11 @@ void Moveit2ExcavateSimpleActionServer::execute(const std::shared_ptr<GoalHandle
   moveit_pose.orientation.z = target_pose.qz;
   moveit_pose.orientation.w = target_pose.qw;
 
-  move_group_->setGoalPositionTolerance(0.1);
-  move_group_->setGoalOrientationTolerance(0.1);
+  // Planning frameを確認
+  std::string planning_frame = move_group_->getPlanningFrame();
+  RCLCPP_INFO(this->get_logger(), "MoveIt Planning Frame: %s", planning_frame.c_str());
+  RCLCPP_INFO(this->get_logger(), "Target pose in planning frame: x=%.3f, y=%.3f, z=%.3f", 
+              moveit_pose.position.x, moveit_pose.position.y, moveit_pose.position.z);
 
   std::vector<moveit::planning_interface::MoveGroupInterface::Plan> plans;
 
@@ -217,6 +231,7 @@ void Moveit2ExcavateSimpleActionServer::execute(const std::shared_ptr<GoalHandle
   moveit::core::RobotState start_state(*move_group_->getCurrentState());
   
   bool planning_success = true;
+  const int max_planning_attempts = 10;  // 最大試行回数
 
   // 0. swing_angleだけ先に設定
   std::vector<double> swing_joint_values;
@@ -231,76 +246,192 @@ void Moveit2ExcavateSimpleActionServer::execute(const std::shared_ptr<GoalHandle
     }
   }
   
-  move_group_->setStartState(start_state);
-  move_group_->setJointValueTarget(swing_joint_values);
-  
   moveit::planning_interface::MoveGroupInterface::Plan swing_plan;
-  if (move_group_->plan(swing_plan) != moveit::core::MoveItErrorCode::SUCCESS) {
-    RCLCPP_ERROR(this->get_logger(), "Failed to plan swing movement");
-    planning_success = false;
-  } else {
-    plans.push_back(swing_plan);
-    
-    // 次の開始状態を更新
-    start_state.setJointGroupPositions(
-      move_group_->getRobotModel()->getJointModelGroup(move_group_->getName()), 
-      swing_joint_values);
-    start_state.update();
-    
-    RCLCPP_INFO(this->get_logger(), "Swing movement plan succeeded");
-  }
-
-  // 1. setPoseTargetでplanを作成
-  if (planning_success) {
+  bool swing_plan_success = false;
+  for (int attempt = 1; attempt <= max_planning_attempts && !swing_plan_success; attempt++) {
+    RCLCPP_INFO(this->get_logger(), "Swing movement planning attempt %d/%d", attempt, max_planning_attempts);
     move_group_->setStartState(start_state);
-    move_group_->setPoseTarget(moveit_pose);
+    move_group_->setJointValueTarget(swing_joint_values);
     
-    moveit::planning_interface::MoveGroupInterface::Plan pose_plan;
-    if (move_group_->plan(pose_plan) != moveit::core::MoveItErrorCode::SUCCESS) {
-      RCLCPP_ERROR(this->get_logger(), "Failed to plan to pose target");
-      planning_success = false;
-    } else {
-      plans.push_back(pose_plan);
+    if (move_group_->plan(swing_plan) == moveit::core::MoveItErrorCode::SUCCESS) {
+      swing_plan_success = true;
+      plans.push_back(swing_plan);
       
-      // planの終端姿勢を取得して次の開始状態にする
-      const auto& trajectory = pose_plan.trajectory_.joint_trajectory;
-      if (!trajectory.points.empty()) {
-        const auto& last_point = trajectory.points.back();
-        start_state.setJointGroupPositions(
-          move_group_->getRobotModel()->getJointModelGroup(move_group_->getName()), 
-          last_point.positions);
-        start_state.update();
-        
-        RCLCPP_INFO(this->get_logger(), "Pose target plan succeeded, using end state for next plan");
-      }
+      // 次の開始状態を更新
+      start_state.setJointGroupPositions(
+        move_group_->getRobotModel()->getJointModelGroup(move_group_->getName()), 
+        swing_joint_values);
+      start_state.update();
+      
+      RCLCPP_INFO(this->get_logger(), "Swing movement plan succeeded on attempt %d", attempt);
+    } else if (attempt == max_planning_attempts) {
+      RCLCPP_ERROR(this->get_logger(), "Failed to plan swing movement after %d attempts", max_planning_attempts);
+      planning_success = false;
     }
   }
 
-  // 2. planの終端姿勢からarm_jointとbucket_jointを同時に動かす
+  // 1. moveit_poseを中心とする円軌道をWaypointsで作成し、computeCartesianPathで動かす
   if (planning_success) {
-    std::vector<double> arm_bucket_joint_values;
-    start_state.copyJointGroupPositions(
-      move_group_->getRobotModel()->getJointModelGroup(move_group_->getName()), 
-      arm_bucket_joint_values);
+    RCLCPP_INFO(this->get_logger(), "Creating circular trajectory around target pose");
     
-    for (size_t i = 0; i < joint_names_.size(); i++) {
-      if (joint_names_[i] == "arm_joint") {
-        arm_bucket_joint_values[i] += 0.1;
-      } else if (joint_names_[i] == "bucket_joint") {
-        arm_bucket_joint_values[i] = 1.7;
+    // 円の半径とウェイポイント数
+    const double circle_radius = 1.5;  // 30cm
+    const int num_waypoints = 16;  // 円周上の点の数
+    
+    // 入力パラメータを取得
+    double center_x = goal->position_with_angle.position.x + offset * cos(swing_angle);
+    double center_y = goal->position_with_angle.position.y + offset * sin(swing_angle);
+    double center_z = goal->position_with_angle.position.z - 1.0;
+    double theta_w = goal->position_with_angle.theta_w;
+    
+    RCLCPP_INFO(this->get_logger(), "Circle center (input params): x=%.3f, y=%.3f, z=%.3f, theta_w=%.3f", 
+                center_x, center_y, center_z, theta_w);
+    
+    // base_linkからの水平角度を計算（掘削面の方向）
+    double horizontal_angle = atan2(center_y, center_x);
+    
+    // 水平距離を計算
+    double horizontal_distance = sqrt(center_x * center_x + center_y * center_y);
+    
+    RCLCPP_INFO(this->get_logger(), "Excavation plane: horizontal_angle=%.3f rad (%.1f deg), distance=%.3f m", 
+                horizontal_angle, horizontal_angle * 180.0 / M_PI, horizontal_distance);
+    
+    // 円軌道のウェイポイントを入力パラメータ(x, y, z, theta_w)で生成
+    std::vector<geometry_msgs::msg::Pose> waypoints;
+    
+    // 下半分の半円を描く（垂直平面上）- 奥から手前へ
+    for (int i = 0; i <= num_waypoints; i++) {
+      // 下半分の円を逆方向に: 180度から0度（2πからπ）
+      double angle = 2.0 * M_PI - (M_PI * i / num_waypoints);
+      
+      // 円軌道の計算（入力パラメータ座標系で）
+      // - 水平方向（base_linkからの距離方向）の変化
+      double radial_offset = circle_radius * cos(angle);
+      // - 垂直方向（Z軸）の変化
+      double vertical_offset = circle_radius * sin(angle);
+      
+      // 水平距離を変化させる
+      double new_horizontal_distance = horizontal_distance + radial_offset;
+      
+      // 新しいx, y, z座標を計算（入力パラメータ座標系）
+      double wp_x = new_horizontal_distance * cos(horizontal_angle);
+      double wp_y = new_horizontal_distance * sin(horizontal_angle);
+      double wp_z = center_z + vertical_offset;
+      
+      // theta_wを段階的に変化させる（0.5からπへ）
+      double t = static_cast<double>(i) / num_waypoints;  // 0.0 から 1.0
+      double wp_theta_w = 0.5 + t * (M_PI - 0.5);
+      
+      // pose_converterで変換
+      Pose target_pose;
+      pose_converter_.convertToXYZQuaternion(wp_x, wp_y, wp_z, wp_theta_w, target_pose);
+      
+      geometry_msgs::msg::Pose wp;
+      wp.position.x = target_pose.x;
+      wp.position.y = target_pose.y;
+      wp.position.z = target_pose.z;
+      wp.orientation.x = target_pose.qx;
+      wp.orientation.y = target_pose.qy;
+      wp.orientation.z = target_pose.qz;
+      wp.orientation.w = target_pose.qw;
+      
+      waypoints.push_back(wp);
+    }
+    
+    RCLCPP_INFO(this->get_logger(), "Generated %zu waypoints for semi-circular trajectory (lower half, back to front) in excavation plane", waypoints.size());
+    RCLCPP_INFO(this->get_logger(), "theta_w range: 0.5 rad (%.1f deg) to π rad (%.1f deg)", 
+                0.5 * 180.0 / M_PI, 180.0);
+    
+    // Planning frameを確認
+    std::string planning_frame = move_group_->getPlanningFrame();
+    RCLCPP_INFO(this->get_logger(), "MoveIt Planning Frame: %s", planning_frame.c_str());
+    if (!waypoints.empty()) {
+      RCLCPP_INFO(this->get_logger(), "First waypoint (after conversion): x=%.3f, y=%.3f, z=%.3f", 
+                  waypoints[0].position.x, waypoints[0].position.y, waypoints[0].position.z);
+      RCLCPP_INFO(this->get_logger(), "Last waypoint (after conversion): x=%.3f, y=%.3f, z=%.3f", 
+                  waypoints.back().position.x, waypoints.back().position.y, waypoints.back().position.z);
+    }
+    
+    // 1.1 最初のwaypointにsetPoseTargetで移動
+    if (!waypoints.empty()) {
+      RCLCPP_INFO(this->get_logger(), "Moving to first waypoint: x=%.3f, y=%.3f, z=%.3f", 
+                  waypoints[0].position.x, waypoints[0].position.y, waypoints[0].position.z);
+      
+      moveit::planning_interface::MoveGroupInterface::Plan first_waypoint_plan;
+      bool first_waypoint_success = false;
+      
+      for (int attempt = 1; attempt <= max_planning_attempts && !first_waypoint_success; attempt++) {
+        RCLCPP_INFO(this->get_logger(), "First waypoint planning attempt %d/%d", attempt, max_planning_attempts);
+        move_group_->setStartState(start_state);
+        move_group_->setPoseTarget(waypoints[0]);
+        
+        if (move_group_->plan(first_waypoint_plan) == moveit::core::MoveItErrorCode::SUCCESS) {
+          first_waypoint_success = true;
+          plans.push_back(first_waypoint_plan);
+          
+          // planの終端姿勢を取得して次の開始状態にする
+          const auto& trajectory = first_waypoint_plan.trajectory_.joint_trajectory;
+          if (!trajectory.points.empty()) {
+            const auto& last_point = trajectory.points.back();
+            start_state.setJointGroupPositions(
+              move_group_->getRobotModel()->getJointModelGroup(move_group_->getName()), 
+              last_point.positions);
+            start_state.update();
+            
+            RCLCPP_INFO(this->get_logger(), "First waypoint plan succeeded on attempt %d", attempt);
+          }
+        } else if (attempt == max_planning_attempts) {
+          RCLCPP_ERROR(this->get_logger(), "Failed to plan to first waypoint after %d attempts", max_planning_attempts);
+          planning_success = false;
+        }
       }
     }
     
-    move_group_->setStartState(start_state);
-    move_group_->setJointValueTarget(arm_bucket_joint_values);
-    
-    moveit::planning_interface::MoveGroupInterface::Plan arm_bucket_plan;
-    if (move_group_->plan(arm_bucket_plan) != moveit::core::MoveItErrorCode::SUCCESS) {
-      RCLCPP_ERROR(this->get_logger(), "Failed to plan arm and bucket movement");
-      planning_success = false;
-    } else {
-      plans.push_back(arm_bucket_plan);
-      RCLCPP_INFO(this->get_logger(), "Arm and bucket movement plan succeeded");
+    // 1.2 円軌道をcomputeCartesianPathで実行
+    if (planning_success && !waypoints.empty()) {
+      // computeCartesianPathでプランを作成
+      moveit_msgs::msg::RobotTrajectory trajectory;
+      const double jump_threshold = 0.0;  // ジャンプ閾値
+      const double eef_step = 0.01;  // エンドエフェクタのステップサイズ（1cm）
+      
+      move_group_->setStartState(start_state);
+      double fraction = move_group_->computeCartesianPath(waypoints, eef_step, jump_threshold, trajectory);
+      
+      RCLCPP_INFO(this->get_logger(), "Cartesian path planning achieved %.2f%% of the path", fraction * 100.0);
+      
+      if (fraction > 0.9) {  // 90%以上のパスが計画できた場合
+        // 軌道の速度を調整（joint_limitsを尊重）
+        robot_trajectory::RobotTrajectory rt(move_group_->getRobotModel(), move_group_->getName());
+        rt.setRobotTrajectoryMsg(*move_group_->getCurrentState(), trajectory);
+        
+        // IterativeParabolicTimeParameterizationを使用（joint_limitsを尊重）
+        trajectory_processing::IterativeParabolicTimeParameterization iptp;
+        bool success = iptp.computeTimeStamps(rt, 1.0, 1.0);  // velocity_scaling=1.0, accel_scaling=1.0
+        
+        if (success) {
+          rt.getRobotTrajectoryMsg(trajectory);
+          RCLCPP_INFO(this->get_logger(), "Successfully applied time parameterization to speed up trajectory");
+        } else {
+          RCLCPP_WARN(this->get_logger(), "Failed to apply time parameterization, using original trajectory");
+        }
+        
+        moveit::planning_interface::MoveGroupInterface::Plan cartesian_plan;
+        cartesian_plan.trajectory_ = trajectory;
+        plans.push_back(cartesian_plan);
+        
+        // 次の開始状態を更新
+        if (!trajectory.joint_trajectory.points.empty()) {
+          const auto& last_point = trajectory.joint_trajectory.points.back();
+          start_state.setJointGroupPositions(
+            move_group_->getRobotModel()->getJointModelGroup(move_group_->getName()), 
+            last_point.positions);
+          start_state.update();
+          RCLCPP_INFO(this->get_logger(), "Circular Cartesian path plan succeeded");
+        }
+      } else {
+        RCLCPP_WARN(this->get_logger(), "Cartesian path planning only achieved %.2f%%, skipping circular motion", fraction * 100.0);
+        planning_success = false;
+      }
     }
   }
 
@@ -310,6 +441,16 @@ void Moveit2ExcavateSimpleActionServer::execute(const std::shared_ptr<GoalHandle
     goal_handle->abort(result);
     return;
   }
+
+  // 成功した場合、順番に実行
+  // for (const auto& plan : plans) {
+  //   if (!move_group_->execute(plan)) {
+  //     RCLCPP_ERROR(this->get_logger(), "Execution failed for one of the trajectories");
+  //     result->error_code.val = static_cast<int>(rclcpp_action::ResultCode::ABORTED);
+  //     goal_handle->abort(result);
+  //     return;
+  //   }
+  // }
 
   // If execution was successful, set the result of the action and mark it as succeeded.
   RCLCPP_INFO(this->get_logger(), "Goal succeeded");
