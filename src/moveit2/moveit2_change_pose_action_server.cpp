@@ -155,7 +155,7 @@ void Moveit2ChangePoseActionServer::execute(const std::shared_ptr<GoalHandleExca
       // 新しく padding_msg を作成
       moveit_msgs::msg::LinkPadding padding_msg;
       padding_msg.link_name = link_names_[i];  // パディングを適用するリンク
-      padding_msg.padding = 0.25;
+      padding_msg.padding = 0.50;
       // パディングリストに追加
       planning_scene_msg.link_padding.push_back(padding_msg);
   }
