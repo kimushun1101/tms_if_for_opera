@@ -26,6 +26,7 @@
 #include <moveit_msgs/msg/collision_object.hpp>
 #include <geometric_shapes/shape_operations.h>
 #include <shape_msgs/msg/mesh.hpp>
+#include <visualization_msgs/msg/marker_array.hpp>
 
 #include <moveit/macros/console_colors.h>
 #include <moveit/robot_state/robot_state.h>
@@ -77,6 +78,7 @@ private:
   moveit::core::RobotStatePtr robot_state_;
 
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr emg_stop_publisher_;  // for emg stop
+  rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr waypoints_marker_publisher_;  // for waypoints visualization
 
   // TF2関連
   std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
@@ -95,6 +97,7 @@ private:
   void apply_collision_objects_from_db(const std::string& record_name);
   void apply_collision_objects_mesh_from_db(const std::vector<std::string>& record_names);
   double getDoubleValue(const bsoncxx::document::element& element);
+  void publish_waypoints_markers(const std::vector<geometry_msgs::msg::Pose>& waypoints, const std::string& frame_id);
 
   bool load_urdf_from_file(const std::string& robot_name);
   void apply_collision_objects_from_robot_description_and_tf(
