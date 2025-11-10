@@ -9,6 +9,8 @@
 #include <urdf/model.h>
 #include <geometric_shapes/shape_operations.h>
 #include <ament_index_cpp/get_package_share_directory.hpp>
+#include <moveit/robot_trajectory/robot_trajectory.h>
+#include <moveit/trajectory_processing/iterative_time_parameterization.h>
 #include <fstream>
 #include <sstream>
 using std::cout;
@@ -294,6 +296,33 @@ void Moveit2LevelActionServer::execute(const std::shared_ptr<GoalHandleExcavator
 
     move_group_->setGoalPositionTolerance(0.1);
     move_group_->setGoalOrientationTolerance(0.1);
+
+    // 初期点への移動を実行（waypoints[0]の高さ+1.5m）
+    geometry_msgs::msg::Pose initial_pose = waypoints[0];
+    initial_pose.position.z += 1.5;  // 高さを1.5m上げる
+    
+    RCLCPP_INFO(this->get_logger(), "Moving to initial point (waypoint[0] + 1.5m height): x=%.3f, y=%.3f, z=%.3f", 
+                initial_pose.position.x, initial_pose.position.y, initial_pose.position.z);
+    
+    move_group_->setPoseTarget(initial_pose);
+
+    feedback->state = "PLANNING";
+    goal_handle->publish_feedback(feedback);
+  
+    if (move_group_->move() != moveit::planning_interface::MoveItErrorCode::SUCCESS)
+    {
+      RCLCPP_ERROR(this->get_logger(), "Failed to move to initial point");
+      feedback->state = "ABORTED";
+      goal_handle->publish_feedback(feedback);
+      result->error_code.val = 9999;
+      goto finish;
+    }
+    
+    RCLCPP_INFO(this->get_logger(), "Successfully moved to initial point");
+    
+    // 中間点への移動を実行
+    RCLCPP_INFO(this->get_logger(), "Moving to intermediate point (waypoint[0]): x=%.3f, y=%.3f, z=%.3f", 
+                waypoints[0].position.x, waypoints[0].position.y, waypoints[0].position.z);
     
     // 中間点への移動を実行
     move_group_->setPoseTarget(waypoints[0]);
@@ -323,6 +352,21 @@ void Moveit2LevelActionServer::execute(const std::shared_ptr<GoalHandleExcavator
     if (fraction >= 0.80)  // 80%以上の経路が計算できた場合
     {
       RCLCPP_INFO(this->get_logger(), "Cartesian path computed successfully (%.2f%% achieved)", fraction * 100.0);
+      
+      // 軌道の速度を調整（joint_limitsを尊重）
+      robot_trajectory::RobotTrajectory rt(move_group_->getRobotModel(), move_group_->getName());
+      rt.setRobotTrajectoryMsg(*move_group_->getCurrentState(), trajectory);
+      
+      // IterativeParabolicTimeParameterizationを使用（joint_limitsを尊重）
+      trajectory_processing::IterativeParabolicTimeParameterization iptp;
+      bool success = iptp.computeTimeStamps(rt, 1.0, 1.0);  // velocity_scaling=1.0, accel_scaling=1.0
+      
+      if (success) {
+        rt.getRobotTrajectoryMsg(trajectory);
+        RCLCPP_INFO(this->get_logger(), "Successfully applied time parameterization to speed up trajectory");
+      } else {
+        RCLCPP_WARN(this->get_logger(), "Failed to apply time parameterization, using original trajectory");
+      }
       
       // 軌道を実行
       moveit::planning_interface::MoveGroupInterface::Plan cartesian_plan;
