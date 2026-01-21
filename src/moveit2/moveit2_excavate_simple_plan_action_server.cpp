@@ -250,15 +250,15 @@ void Moveit2ExcavateSimpleActionServer::execute(const std::shared_ptr<GoalHandle
   std::vector<std::vector<double>> joint_targets;
 
   // Swingだけ先に動かす
-  std::vector<double> swing_joint_values(joint_names_.size(), 0.0);
-  swing_joint_values = move_group_->getCurrentJointValues();
-  for (size_t i = 0; i < joint_names_.size(); i++) {
-    if (joint_names_[i] == "swing_joint") {
-      swing_joint_values[i] = target_joint_values[i];
-    }
-  }
+  // std::vector<double> swing_joint_values(joint_names_.size(), 0.0);
+  // swing_joint_values = move_group_->getCurrentJointValues();
+  // for (size_t i = 0; i < joint_names_.size(); i++) {
+  //   if (joint_names_[i] == "swing_joint") {
+  //     swing_joint_values[i] = target_joint_values[i];
+  //   }
+  // }
 
-  joint_targets.push_back(swing_joint_values);
+  // joint_targets.push_back(swing_joint_values);
   
   joint_targets.push_back(target_joint_values);
   

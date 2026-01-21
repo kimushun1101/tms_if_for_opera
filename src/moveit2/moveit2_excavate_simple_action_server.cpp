@@ -247,36 +247,19 @@ void Moveit2ExcavateSimpleActionServer::execute(const std::shared_ptr<GoalHandle
   std::vector<moveit::planning_interface::MoveGroupInterface::Plan> plans;
   std::vector<std::vector<double>> joint_targets;
 
-  // Swingだけ先に動かす
-  std::vector<double> swing_joint_values(joint_names_.size(), 0.0);
-  swing_joint_values = move_group_->getCurrentJointValues();
-  for (size_t i = 0; i < joint_names_.size(); i++) {
-    if (joint_names_[i] == "swing_joint") {
-      swing_joint_values[i] = target_joint_values[i];
-    }
-  }
-
-  joint_targets.push_back(swing_joint_values);
-  
+  // 目標位置への移動
   joint_targets.push_back(target_joint_values);
   
-  // arm_joint を追加で動かした状態
+  // arm_joint と bucket_joint を追加で動かした状態（コピーを作成）
+  std::vector<double> excavate_joint_values = target_joint_values;  // コピーを作成
   for (size_t i = 0; i < joint_names_.size(); i++) {
     if (joint_names_[i] == "arm_joint") {
-      target_joint_values[i] += 0.1;
+      excavate_joint_values[i] += 0.1;
     } else if (joint_names_[i] == "bucket_joint") {
-      target_joint_values[i] = 1.7;
+      excavate_joint_values[i] = 1.7;
     }
   }
-  joint_targets.push_back(target_joint_values);
-  
-  // // bucket_joint を追加で動かした状態
-  // for (size_t i = 0; i < joint_names_.size(); i++) {
-  //   if (joint_names_[i] == "bucket_joint") {
-  //     target_joint_values[i] = 2.2;
-  //   }
-  // }
-  // joint_targets.push_back(target_joint_values);
+  joint_targets.push_back(excavate_joint_values);
   
   // while(!joint_targets.empty()){
     // 最初の状態を取得
