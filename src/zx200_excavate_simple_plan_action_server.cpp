@@ -75,8 +75,8 @@ Zx200ExcavateSimpleActionServer::Zx200ExcavateSimpleActionServer(const rclcpp::N
   
   // moveit::planning_interface::PlanningSceneInterface planning_scene_interface_;
 
-  move_group_->setMaxVelocityScalingFactor(1.0);
-  move_group_->setMaxAccelerationScalingFactor(1.0);
+  move_group_->setMaxVelocityScalingFactor(0.3);
+  move_group_->setMaxAccelerationScalingFactor(0.3);
   move_group_->setNumPlanningAttempts(10);
   move_group_->setPlanningTime(10.0);
   move_group_->setPlannerId("RRTConnectkConfigDefault");

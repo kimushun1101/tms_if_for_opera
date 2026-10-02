@@ -72,8 +72,8 @@ Zx200ChangePoseActionServer::Zx200ChangePoseActionServer(const rclcpp::NodeOptio
   move_group_options_ = std::make_shared<moveit::planning_interface::MoveGroupInterface::Options>(planning_group_, "robot_description", "/zx200");
   move_group_ = std::make_shared<moveit::planning_interface::MoveGroupInterface>(move_group_node_, *move_group_options_);
 
-  move_group_->setMaxVelocityScalingFactor(1.0);
-  move_group_->setMaxAccelerationScalingFactor(1.0);
+  move_group_->setMaxVelocityScalingFactor(0.3);
+  move_group_->setMaxAccelerationScalingFactor(0.3);
   move_group_->setNumPlanningAttempts(100);
   move_group_->setPlanningTime(60.0);
   move_group_->setPlannerId("RRTConnectkConfigDefault");
